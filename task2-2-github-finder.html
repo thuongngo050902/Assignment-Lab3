@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>GitHub Repository Finder</title>
+  <style>
+    /* CSS tổng quan: reset box model và margin */
+    *{box-sizing:border-box;margin:0;padding:0}
+    /* body: theme tối và padding chung */
+    body{font-family:Segoe UI,Arial;background:#0d1117;color:#c9d1d9;padding:18px}
+    /* container chính để căn giữa nội dung */
+    .container{max-width:1000px;margin:0 auto}
+    header{margin-bottom:14px}
+    h1{color:#58a6ff} /* tiêu đề chính */
+    /* card: hộp chứa controls (search + filter) */
+    .card{background:#0b1115;padding:14px;border-radius:8px;border:1px solid #222;margin-bottom:12px}
+    /* layout thanh tìm kiếm: input + button */
+    .search{display:flex;gap:8px;align-items:center}
+    .search input{flex:1;padding:10px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9}
+    .search button{padding:10px 14px;border-radius:6px;background:#238636;color:#fff;border:none;cursor:pointer}
+    /* filter area (sort select) */
+    .filters{display:flex;gap:8px;align-items:center;margin-top:8px}
+    .repo-list{margin-top:12px} /* nơi render danh sách repo */
+    /* card cho từng repo */
+    .repo{background:#0b1115;border:1px solid #222;padding:12px;border-radius:8px;margin-bottom:10px}
+    .repo a{color:#58a6ff;text-decoration:none;font-weight:700} /* link repo */
+    .meta{color:#8b949e;margin-top:8px;font-size:14px;display:flex;gap:12px;flex-wrap:wrap} /* thông tin phụ */
+    .load-more{display:flex;justify-content:center;margin-top:12px} /* nút load more */
+    .load-more button{padding:10px 18px;border-radius:8px;background:#161b22;color:#c9d1d9;border:none;cursor:pointer}
+    .error{background:#da3633;color:#fff;padding:10px;border-radius:8px;margin-bottom:12px} /* hiển thị lỗi */
+    .empty{color:#8b949e;padding:12px} /* văn bản trống/đang load */
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header: title và mô tả -->
+    <header>
+      <h1>🔍 GitHub Repository Finder</h1>
+      <p style="color:#8b949e">Search and explore GitHub repositories</p>
+    </header>
+
+    <!-- Card chứa ô tìm kiếm và bộ lọc -->
+    <div class="card">
+      <div class="search">
+        <!-- Input tìm kiếm (Enter để submit) -->
+        <input id="searchInput" placeholder="Search repositories... (e.g. react)" onkeypress="if(event.key==='Enter') performSearch()">
+        <!-- Nút tìm kiếm -->
+        <button onclick="performSearch()">Search</button>
+      </div>
+      <!-- Bộ lọc sắp xếp (khi thay đổi sẽ chạy tìm lại) -->
+      <div class="filters" style="margin-top:8px">
+        <label style="color:#8b949e">Sort by:</label>
+        <select id="sortSelect" onchange="performSearch()">
+          <option value="stars">stars</option>
+          <option value="forks">forks</option>
+          <option value="updated">updated</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Nơi hiển thị lỗi nếu có -->
+    <div id="errorMessage"></div>
+    <!-- Nơi render danh sách repository -->
+    <div id="repoList" class="repo-list"></div>
+    <!-- Nơi đặt nút Load more / pagination -->
+    <div id="loadMoreContainer" class="load-more"></div>
+  </div>
+
+  <script>
+    // Biến trạng thái cho pagination / sort / query
+    let currentPage = 1;
+    let currentQuery = '';
+    let currentSort = 'stars';
+    let totalResults = 0;
+
+    // Tham chiếu DOM element cần dùng
+    const repoListEl = document.getElementById('repoList');
+    const loadMoreContainer = document.getElementById('loadMoreContainer');
+    const errorMessage = document.getElementById('errorMessage');
+
+    // Hiển thị lỗi (đơn giản, 1 dòng)
+    function showError(msg){ errorMessage.innerHTML = `<div class="error">${msg}</div>`; }
+    // Xóa lỗi
+    function clearError(){ errorMessage.innerHTML = ''; }
+
+    // Format số lớn thành 1.5k / 2.3M cho hiển thị gọn
+    function formatNumber(num){
+      if(num >= 1000000) return (num/1000000).toFixed(1)+'M';
+      if(num >= 1000) return (num/1000).toFixed(1)+'k';
+      return String(num);
+    }
+
+    /* 
+      Gọi GitHub Search API để tìm repositories.
+      - query: từ khóa
+      - sort: stars|forks|updated
+      - page, per_page: pagination
+      Nếu response không ok sẽ ném lỗi có thuộc tính status để xử lý ở caller.
+    */
+    async function searchRepositories(query, sort='stars', page=1, per_page=10){
+      const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}&page=${page}&per_page=${per_page}`;
+      const res = await fetch(url);
+      if(!res.ok){
+        const err = new Error('HTTP '+res.status);
+        err.status = res.status;
+        throw err;
+      }
+      return res.json(); // trả về JSON đã parse
+    }
+
+    /*
+      Tạo HTML cho một repo card từ object repo trả về
+      Hiển thị: full_name (link), description, stars, forks, owner, language, updated date
+    */
+    function createRepoCard(repo){
+      const desc = repo.description ? repo.description : '';
+      const lang = repo.language ? repo.language : '—';
+      return `
+        <div class="repo">
+          <div><a href="${repo.html_url}" target="_blank" rel="noopener">${repo.full_name}</a></div>
+          <div class="repo-desc" style="color:#8b949e;margin-top:6px">${desc}</div>
+          <div class="meta">
+            <div>⭐ ${formatNumber(repo.stargazers_count)}</div>
+            <div>🔱 ${formatNumber(repo.forks_count)}</div>
+            <div>🧑 ${repo.owner?.login || '—'}</div>
+            <div class="language">💠 ${lang}</div>
+            <div>Updated: ${new Date(repo.updated_at).toLocaleDateString()}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    /*
+      Render danh sách repositories lên UI.
+      - append = false => replace toàn bộ (một tìm kiếm mới)
+      - append = true => thêm vào cuối (load more)
+    */
+    function displayRepositories(items, append=false){
+      if(!append) repoListEl.innerHTML = '';
+      if(!items || items.length === 0){
+        if(!append) repoListEl.innerHTML = `<div class="empty">No results</div>`;
+        return;
+      }
+      const html = items.map(createRepoCard).join('');
+      if(append) repoListEl.insertAdjacentHTML('beforeend', html);
+      else repoListEl.innerHTML = html;
+    }
+
+    /*
+      performSearch: đọc input + sort, reset page, gọi API và show results.
+      - hiển thị loading message tạm thời
+      - cập nhật totalResults để quyết định có hiện nút Load more hay không
+      - bắt lỗi rate-limit (403) hoặc lỗi khác
+    */
+    async function performSearch(){
+      clearError();
+      const qEl = document.getElementById('searchInput');
+      const sortEl = document.getElementById('sortSelect');
+      const query = qEl.value.trim();
+      const sort = sortEl.value || 'stars';
+      if(!query){ showError('Nhập từ khóa tìm kiếm trước.'); return; }
+      currentQuery = query; currentSort = sort; currentPage = 1;
+      repoListEl.innerHTML = `<div class="empty">Loading...</div>`;
+      loadMoreContainer.innerHTML = '';
+      try {
+        const data = await searchRepositories(query, sort, currentPage, 10);
+        totalResults = data.total_count || 0;
+        displayRepositories(data.items || [], false);
+        // nếu còn kết quả, hiển thị nút Load more
+        if(totalResults > currentPage * 10){
+          loadMoreContainer.innerHTML = `<button onclick="loadMore()">Load more</button>`;
+        } else loadMoreContainer.innerHTML = '';
+      } catch (err) {
+        // nếu rate limit bị vượt (403) thì hiển thị thông báo cụ thể
+        if(err.status === 403) showError('Rate limit exceeded (60 req/hour unauthenticated).');
+        else showError('Lỗi khi truy vấn GitHub API.');
+        repoListEl.innerHTML = '';
+      }
+    }
+
+    /*
+      loadMore: tăng page và tải trang tiếp theo, sau đó append kết quả
+      - xử lý tương tự performSearch nhưng append = true
+    */
+    async function loadMore(){
+      if(!currentQuery) return;
+      currentPage++;
+      loadMoreContainer.innerHTML = `<div class="empty">Loading more...</div>`;
+      try {
+        const data = await searchRepositories(currentQuery, currentSort, currentPage, 10);
+        displayRepositories(data.items || [], true);
+        if(totalResults > currentPage * 10) loadMoreContainer.innerHTML = `<button onclick="loadMore()">Load more</button>`;
+        else loadMoreContainer.innerHTML = '';
+      } catch (err) {
+        if(err.status === 403) showError('Rate limit exceeded (60 req/hour).');
+        else showError('Lỗi khi truy vấn GitHub API.');
+        loadMoreContainer.innerHTML = '';
+      }
+    }
+  </script>
+</body>
+</html>

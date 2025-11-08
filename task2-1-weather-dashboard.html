@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <title>Weather Dashboard - Minimal</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    /* CSS tối giản cho layout và responsive */
+    :root{--card:#ffffff;--bg:linear-gradient(135deg,#667eea,#764ba2)}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,Helvetica,sans-serif;background:var(--bg);min-height:100vh;padding:20px;color:#111}
+    .wrap{max-width:860px;margin:0 auto}
+    h1{text-align:center;color:#fff;margin-bottom:18px}
+    .card{background:var(--card);padding:14px;border-radius:10px;box-shadow:0 8px 20px rgba(0,0,0,.12);margin-bottom:14px}
+    .search{display:flex;gap:8px;align-items:center}
+    .search input{flex:1;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:16px}
+    .search button{padding:9px 12px;border:none;background:#2b6df6;color:#fff;border-radius:6px;cursor:pointer}
+    .chips{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
+    .chip{background:#eef2ff;padding:6px 10px;border-radius:16px;font-size:14px;cursor:pointer}
+    .current-row{display:flex;justify-content:space-between;align-items:center}
+    .city-info{font-weight:700}
+    .temp{font-size:48px;font-weight:800}
+    .meta{color:#555;margin-top:6px;font-size:14px}
+    .forecast{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:12px}
+    .fitem{background:#f6f8ff;padding:10px;border-radius:8px;text-align:center}
+    .error{background:#dc3545;color:#fff;padding:8px;border-radius:6px;margin-bottom:12px}
+    .loading{text-align:center;color:#fff;padding:10px}
+    @media(max-width:600px){ .temp{font-size:34px} .current-row{flex-direction:column;align-items:flex-start} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <!-- Tiêu đề -->
+    <h1>Weather Dashboard</h1>
+
+    <!-- Thanh tìm kiếm và recent searches -->
+    <div class="card">
+      <!-- Search input -->
+      <div class="search">
+        <input id="cityInput" placeholder="Nhập tên thành phố, ví dụ: Hanoi" 
+               onkeypress="if(event.key==='Enter') searchWeather()" />
+        <button id="searchBtn">Search</button>
+      </div>
+      <!-- Hiển thị recent searches -->
+      <div class="chips" id="recent"></div>
+    </div>
+
+    <!-- Nơi hiển thị lỗi -->
+    <div id="error"></div>
+
+    <!-- Hiện thời tiết hiện tại -->
+    <div id="current" ></div>
+
+    <!-- Dự báo 5 ngày -->
+    <div id="forecast"></div>
+  </div>
+
+  <script>
+    // === API KEY
+    const API_KEY = '551a90ee24cc643cd5d2a7b8130ec3d3';
+
+    // map đơn giản weather main -> emoji
+    const ICON = {
+      Clear: '☀️', Clouds: '☁️', Rain: '🌧️', Drizzle: '🌦️',
+      Thunderstorm: '⛈️', Snow: '❄️', Mist: '🌫️', Haze: '🌫️', Fog: '🌫️', Smoke: '🌫️'
+    };
+
+    // chọn DOM element cần dùng
+    const cityInput = document.getElementById('cityInput');
+    const searchBtn = document.getElementById('searchBtn');
+    const recentEl = document.getElementById('recent');
+    const errorEl = document.getElementById('error');
+    const currentEl = document.getElementById('current');
+    const forecastEl = document.getElementById('forecast');
+
+    // load recent searches từ localStorage (max 5)
+    function loadRecent(){
+      const arr = JSON.parse(localStorage.getItem('recent_weathers') || '[]');
+      recentEl.innerHTML = arr.map(c => `<div class="chip" onclick="onRecent('${escapeHtml(c)}')">${c}</div>`).join('');
+    }
+
+    // helper escape cho onclick string
+    function escapeHtml(s){ return s.replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+
+    // lưu recent search mới, giữ unique, max 5
+    function saveRecent(city){
+      if(!city) return;
+      const key = 'recent_weathers';
+      const arr = JSON.parse(localStorage.getItem(key) || '[]');
+      const n = city.trim();
+      const filtered = arr.filter(x => x.toLowerCase() !== n.toLowerCase());
+      filtered.unshift(n);
+      localStorage.setItem(key, JSON.stringify(filtered.slice(0,5)));
+      loadRecent();
+    }
+
+    // hiển thị lỗi ngắn gọn
+    function showError(msg){ errorEl.innerHTML = `<div class="error">${msg}</div>`; }
+    function clearError(){ errorEl.innerHTML = ''; }
+
+    // fetch current weather từ OpenWeather (units=metric để °C)
+    async function fetchWeather(city){
+      const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${API_KEY}&units=metric`;
+      const res = await fetch(url);
+      if(!res.ok) throw res;
+      return res.json();
+    }
+
+    // fetch forecast 5-day (3-hour steps)
+    async function fetchForecast(city){
+      const url = `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(city)}&appid=${API_KEY}&units=metric`;
+      const res = await fetch(url);
+      if(!res.ok) throw res;
+      return res.json();
+    }
+
+    // hiển thị current weather (tên, mô tả, humidity, wind)
+    function displayCurrent(data){
+      const name = `${data.name}${data.sys?.country ? ', ' + data.sys.country : ''}`;
+      const descRaw = data.weather[0].description || '';
+      const desc = descRaw.charAt(0).toUpperCase() + descRaw.slice(1); // viết hoa đầu
+      const emoji = ICON[data.weather[0].main] || '🌤️';
+      const temp = Math.round(data.main.temp);
+      const humidity = data.main.humidity;
+      const windKmh = Math.round((data.wind?.speed || 0) * 3.6); // m/s -> km/h
+      currentEl.innerHTML = `
+        <div class="card">
+          <div class="current-row">
+            <div>
+              <div class="city-info">${name}</div>
+              <div style="margin-top:6px">${desc} ${emoji}</div>
+              <div class="meta">Humidity: ${humidity}% &nbsp;|&nbsp; Wind: ${windKmh} km/h</div>
+            </div>
+            <div class="temp">${temp}°C</div>
+          </div>
+        </div>
+      `;
+    }
+
+    // lọc forecast: chọn record có "12:00:00" mỗi ngày (1 entry/ngày)
+    function pickDaily(list){
+      const map = {};
+      for(const item of list){
+        const [date, time] = item.dt_txt.split(' ');
+        if(!map[date] || time === '12:00:00') map[date] = item;
+      }
+      return Object.keys(map).slice(0,5).map(d => map[d]);
+    }
+
+    // hiển thị forecast 5 ngày đơn giản
+    function displayForecast(data){
+      const items = pickDaily(data.list || []);
+      if(!items || items.length === 0){ forecastEl.innerHTML = ''; return; }
+      let html = '<div class="card"><div style="font-weight:700;margin-bottom:8px">5-Day Forecast</div><div class="forecast">';
+      for(const it of items){
+        const dt = new Date(it.dt * 1000);
+        const day = dt.toLocaleDateString(undefined, {weekday:'short'});
+        const t = Math.round(it.main.temp);
+        const em = ICON[it.weather[0].main] || '🌤️';
+        html += `<div class="fitem"><div style="font-weight:700">${day}</div><div style="font-size:22px">${em}</div><div style="margin-top:6px">${t}°C</div></div>`;
+      }
+      html += '</div></div>';
+      forecastEl.innerHTML = html;
+    }
+
+    // hành động khi click recent chip
+    function onRecent(city){
+      cityInput.value = city;
+      searchWeather();
+    }
+
+    // hàm tìm chính: gọi API, xử lý loading, lỗi, lưu recent
+    async function searchWeather(){
+      const city = cityInput.value.trim();
+      if(!city){ showError('Nhập tên thành phố.'); return; }
+      clearError();
+      currentEl.innerHTML = `<div class="loading">Loading current weather...</div>`;
+      forecastEl.innerHTML = `<div class="loading">Loading forecast...</div>`;
+      try {
+        // gọi song song 2 API
+        const [cur, fcast] = await Promise.all([fetchWeather(city), fetchForecast(city)]);
+        displayCurrent(cur);
+        displayForecast(fcast);
+        saveRecent(city);
+      } catch (err) {
+        if(err && err.status === 404) showError('Không tìm thấy thành phố (404).');
+        else if(err && err.status === 401) showError('API key không hợp lệ (401).');
+        else if(err && err.status === 429) showError('Quá nhiều yêu cầu (rate limit).');
+        else showError('Lỗi khi lấy dữ liệu thời tiết.');
+        currentEl.innerHTML = '';
+        forecastEl.innerHTML = '';
+      }
+    }
+
+    // gán sự kiện cho nút search
+    searchBtn.addEventListener('click', searchWeather);
+
+    // khởi tạo recent khi load
+    loadRecent();
+  </script>
+</body>
+</html>
